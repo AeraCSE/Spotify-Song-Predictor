@@ -1,5 +1,5 @@
-
 import os
+import numpy as np
 import pandas as pd
 import joblib
 
@@ -9,123 +9,108 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    classification_report,
-    confusion_matrix,
+    accuracy_score, precision_score, recall_score, f1_score,
+    classification_report, confusion_matrix
 )
 from sklearn.dummy import DummyClassifier
 
-# 1. Load the original dataset
+# Load and clean data
 df = pd.read_csv("dataset.csv")
 df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
 df = df.drop_duplicates(subset=["track_id"])
 
-# 2. Select audio features
 features = [
-    "danceability",
-    "energy",
-    "loudness",
-    "speechiness",
-    "acousticness",
-    "instrumentalness",
-    "liveness",
-    "valence",
-    "tempo",
-    "duration_ms",
+    "danceability", "energy", "loudness", "speechiness",
+    "acousticness", "instrumentalness", "liveness", "valence",
+    "tempo", "duration_ms"
 ]
-
 df = df.dropna(subset=features + ["popularity"])
 df["hit"] = (df["popularity"] >= 70).astype(int)
 
-X = df[features]
-y = df["hit"]
+X, y = df[features], df["hit"]
 
-print("Songs:", len(df))
-print("High-popularity songs:", int(y.sum()))
-
-# 3. Split data while preserving class proportions
+# Keep a final test set untouched during threshold selection
 X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.20,
-    random_state=42,
-    stratify=y,
+    X, y, test_size=0.20, random_state=42, stratify=y
 )
 
-# 4. Define models
+# Split training data again to select the Logistic Regression threshold
+X_fit, X_val, y_fit, y_val = train_test_split(
+    X_train, y_train, test_size=0.20, random_state=42, stratify=y_train
+)
+
+logistic = make_pipeline(
+    StandardScaler(),
+    LogisticRegression(class_weight="balanced", max_iter=1000)
+)
+logistic.fit(X_fit, y_fit)
+
+val_probabilities = logistic.predict_proba(X_val)[:, 1]
+thresholds = np.arange(0.05, 0.96, 0.01)
+threshold_scores = [
+    f1_score(y_val, val_probabilities >= threshold, zero_division=0)
+    for threshold in thresholds
+]
+best_threshold = float(thresholds[int(np.argmax(threshold_scores))])
+
+# Refit on all training data; evaluate once on the untouched test set
+logistic.fit(X_train, y_train)
+
 models = {
-    "Logistic Regression": make_pipeline(
-        StandardScaler(),
-        LogisticRegression(
-            class_weight="balanced",
-            max_iter=1000,
+    "Logistic Regression": (logistic, best_threshold),
+    "Random Forest": (
+        RandomForestClassifier(
+            n_estimators=100, class_weight="balanced",
+            random_state=42, n_jobs=-1
         ),
-    ),
-    "Random Forest": RandomForestClassifier(
-        n_estimators=100,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    ),
+        0.50
+    )
 }
 
-# 5. Baseline for comparison
 baseline = DummyClassifier(strategy="most_frequent")
 baseline.fit(X_train, y_train)
-baseline_predictions = baseline.predict(X_test)
+baseline_pred = baseline.predict(X_test)
+print("Baseline F1-score:", round(
+    f1_score(y_test, baseline_pred, zero_division=0), 4
+))
+print("Selected Logistic Regression threshold:", round(best_threshold, 2))
 
-print("\nBaseline F1-score:",
-      round(f1_score(y_test, baseline_predictions, zero_division=0), 3))
-
-# 6. Train, evaluate and save both models
 os.makedirs("models", exist_ok=True)
 results = []
 
-for name, model in models.items():
-    print(f"\nTraining {name}...")
-    model.fit(X_train, y_train)
-    predictions = model.predict(X_test)
+for name, (model, threshold) in models.items():
+    print(f"\nTraining/evaluating {name}...")
+    if name == "Random Forest":
+        model.fit(X_train, y_train)
 
-    accuracy = accuracy_score(y_test, predictions)
-    precision = precision_score(y_test, predictions, zero_division=0)
-    recall = recall_score(y_test, predictions, zero_division=0)
-    f1 = f1_score(y_test, predictions, zero_division=0)
+    probabilities = model.predict_proba(X_test)[:, 1]
+    predictions = (probabilities >= threshold).astype(int)
 
-    results.append({
+    row = {
         "Model": name,
-        "Accuracy": accuracy,
-        "Precision": precision,
-        "Recall": recall,
-        "F1-score": f1,
-    })
+        "Threshold": threshold,
+        "Accuracy": accuracy_score(y_test, predictions),
+        "Precision": precision_score(y_test, predictions, zero_division=0),
+        "Recall": recall_score(y_test, predictions, zero_division=0),
+        "F1-score": f1_score(y_test, predictions, zero_division=0)
+    }
+    results.append(row)
 
-    print("\n", name)
+    print(row)
     print(classification_report(
-        y_test,
-        predictions,
+        y_test, predictions,
         target_names=["Other", "High popularity"],
-        zero_division=0,
+        zero_division=0
     ))
-    print("Confusion matrix:")
-    print(confusion_matrix(y_test, predictions))
+    print("Confusion matrix:\n", confusion_matrix(y_test, predictions))
 
     filename = name.lower().replace(" ", "_") + ".joblib"
     joblib.dump(
-        {"model": model, "features": features},
-        os.path.join("models", filename),
+        {"model": model, "features": features, "threshold": threshold},
+        os.path.join("models", filename)
     )
 
-# 7. Compare models
-results_df = pd.DataFrame(results).sort_values(
-    "F1-score", ascending=False
-)
-
-print("\nMODEL COMPARISON")
-print(results_df.to_string(index=False))
-
+results_df = pd.DataFrame(results).sort_values("F1-score", ascending=False)
 results_df.to_csv("model_results.csv", index=False)
-print("\nModels saved in the models/ folder.")
-print("Comparison saved to model_results.csv.")
+print("\nMODEL COMPARISON\n", results_df.to_string(index=False))
+print("\nSaved models and model_results.csv.")
