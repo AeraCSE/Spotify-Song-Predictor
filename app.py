@@ -471,6 +471,7 @@ if predict_clicked:
         bundle = joblib.load(available_models[chosen_model])
         model = bundle["model"]
         features = bundle["features"]
+        threshold = bundle.get("threshold", 0.50)
 
         input_values = {
             "danceability": danceability,
@@ -490,7 +491,15 @@ if predict_clicked:
             columns=features
         )
 
-        prediction = int(model.predict(input_data)[0])
+        probability_for_hit = (
+            float(model.predict_proba(input_data)[0][list(model.classes_).index(1)])
+            if hasattr(model, "predict_proba") else None
+        )
+        prediction = (
+            int(probability_for_hit >= threshold)
+            if probability_for_hit is not None
+            else int(model.predict(input_data)[0])
+        )
         st.session_state.prediction_result = {
             "prediction": prediction,
             "probability": (
@@ -508,11 +517,9 @@ if predict_clicked:
         else:
             st.info("OTHER POPULARITY CATEGORY")
 
-        if hasattr(model, "predict_proba"):
-            probabilities = model.predict_proba(input_data)[0]
-            classes = list(model.classes_)
-            positive_index = classes.index(1)
-            probability = float(probabilities[positive_index])
+        if probability_for_hit is not None:
+            probability = probability_for_hit
+            st.caption(f"Decision threshold: {threshold:.2f}")
 
             st.metric(
                 "Estimated model probability for high popularity",
